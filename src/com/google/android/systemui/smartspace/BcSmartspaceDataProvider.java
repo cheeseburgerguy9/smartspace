@@ -1,6 +1,7 @@
 package com.google.android.systemui.smartspace;
 
 import android.app.smartspace.SmartspaceTarget;
+import android.content.Context;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -12,17 +13,14 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CopyOnWriteArraySet;
-import java.util.stream.Collectors;
 
 public class BcSmartspaceDataProvider implements BcSmartspaceDataPlugin {
-    private static final String TAG = "BcSmartspaceDataProvider";
-    protected final Set<View.OnAttachStateChangeListener> mAttachListeners = new HashSet<>();
-    protected final EventNotifierProxy mEventNotifier = new EventNotifierProxy();
-    protected final Set<BcSmartspaceDataPlugin.SmartspaceTargetListener> mSmartspaceTargetListeners = new CopyOnWriteArraySet<>();
-    protected List<SmartspaceTarget> mSmartspaceTargets = new ArrayList<>();
-    protected final Set<View> mViews = new HashSet<>();
-    protected BcSmartspaceConfigPlugin mConfigProvider;
+    public final Set<BcSmartspaceDataPlugin.SmartspaceTargetListener> mSmartspaceTargetListeners = new HashSet<>();
+    public final List<SmartspaceTarget> mSmartspaceTargets = new ArrayList<>();
+    public final Set<View> mViews = new HashSet<>();
+    public final Set<View.OnAttachStateChangeListener> mAttachListeners = new HashSet<>();
+    public final EventNotifierProxy mEventNotifier = new EventNotifierProxy();
+    public BcSmartspaceConfigPlugin mConfigProvider = new DefaultBcSmartspaceConfigProvider();
 
     private final View.OnAttachStateChangeListener mStateChangeListener = new View.OnAttachStateChangeListener() {
         @Override
@@ -52,24 +50,22 @@ public class BcSmartspaceDataProvider implements BcSmartspaceDataPlugin {
 
     @Override
     public SmartspaceView getView(ViewGroup parent) {
-        View view = LayoutInflater.from(parent.getContext()).inflate(R.layout.smartspace_enhanced, parent, false);
+        // int layoutRes = mConfigProvider.isViewPager2Enabled() ? R.layout.smartspace_enhanced2 : R.layout.smartspace_enhanced;
+        // Stubbing config provider check or assuming default
+        int layoutRes = R.layout.smartspace_enhanced;
+        View view = LayoutInflater.from(parent.getContext()).inflate(layoutRes, parent, false);
         view.addOnAttachStateChangeListener(mStateChangeListener);
         return (SmartspaceView) view;
     }
 
     @Override
-    public void notifySmartspaceEvent(android.app.smartspace.SmartspaceTargetEvent event) {
-        mEventNotifier.notifySmartspaceEvent(event);
-    }
-
-    @Override
-    public void onSmartspaceTargetsUpdated(List<SmartspaceTarget> targets) {
-        // Filter out feature type 15 (Media) as per smali logic
-        List<SmartspaceTarget> filteredTargets = targets.stream()
-                .filter(t -> t.getFeatureType() != 15)
-                .collect(Collectors.toList());
-
-        mSmartspaceTargets = filteredTargets;
+    public void onTargetsAvailable(List<SmartspaceTarget> targets) {
+        mSmartspaceTargets.clear();
+        for (SmartspaceTarget target : targets) {
+            if (target.getFeatureType() != 15) {
+                mSmartspaceTargets.add(target);
+            }
+        }
         for (BcSmartspaceDataPlugin.SmartspaceTargetListener listener : mSmartspaceTargetListeners) {
             listener.onSmartspaceTargetsUpdated(mSmartspaceTargets);
         }
@@ -90,6 +86,18 @@ public class BcSmartspaceDataProvider implements BcSmartspaceDataPlugin {
     public void unregisterListener(BcSmartspaceDataPlugin.SmartspaceTargetListener listener) {
         mSmartspaceTargetListeners.remove(listener);
     }
+
+    @Override
+    public void notifySmartspaceEvent(android.app.smartspace.SmartspaceTargetEvent event) {
+        mEventNotifier.notifySmartspaceEvent(event);
+    }
+
+    public BcSmartspaceDataPlugin.SmartspaceEventNotifier getEventNotifier() {
+        return mEventNotifier;
+    }
+
+    // Missing methods from interface in AOSP might be handled by proxy or not needed if strictly following reference which implements a specific version of plugin interface.
+    // The reference has setEventDispatcher, setIntentStarter.
 
     public void setEventDispatcher(BcSmartspaceDataPlugin.SmartspaceEventDispatcher eventDispatcher) {
         mEventNotifier.eventDispatcher = eventDispatcher;

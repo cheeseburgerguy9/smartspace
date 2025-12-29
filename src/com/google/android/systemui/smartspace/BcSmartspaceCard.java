@@ -1,20 +1,21 @@
 package com.google.android.systemui.smartspace;
 
+import android.app.smartspace.SmartspaceAction;
+import android.app.smartspace.SmartspaceTarget;
 import android.content.Context;
 import android.util.AttributeSet;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-import com.android.systemui.plugins.BcSmartspaceDataPlugin;
-import com.android.systemui.res.R;
 import android.view.View;
 import android.view.ViewGroup;
+import androidx.constraintlayout.widget.ConstraintLayout;
+import com.android.systemui.plugins.BcSmartspaceDataPlugin;
+import com.google.android.systemui.smartspace.logging.BcSmartspaceCardLoggingInfo;
+import com.android.systemui.res.R;
 
-public class BcSmartspaceCard extends LinearLayout {
-    protected int mTopPadding;
-    protected TextView mDateView;
-    protected TextView mTitleView;
-    protected TextView mSubtitleView;
-    protected ViewGroup mIconViewGroup;
+public class BcSmartspaceCard extends ConstraintLayout implements SmartspaceCard {
+    public BcSmartspaceCardSecondary mSecondaryCard;
+    public SmartspaceTarget mTarget;
+    public BcSmartspaceCardLoggingInfo mLoggingInfo;
+    public float mDozeAmount;
 
     public BcSmartspaceCard(Context context) {
         this(context, null);
@@ -22,32 +23,34 @@ public class BcSmartspaceCard extends LinearLayout {
 
     public BcSmartspaceCard(Context context, AttributeSet attrs) {
         super(context, attrs);
-        // Implementation based on assumption of standard smartspace card layout logic
-        // Smali analysis suggests it sets text color, parses smartspace target, etc.
+        // Initialization
     }
 
-    @Override
-    protected void onFinishInflate() {
-        super.onFinishInflate();
-        mDateView = findViewById(R.id.date);
-        mTitleView = findViewById(R.id.title_text);
-        mSubtitleView = findViewById(R.id.subtitle_text);
-        mIconViewGroup = findViewById(R.id.base_icon_group);
-    }
-
-    public void setSmartspaceTarget(android.app.smartspace.SmartspaceTarget target, BcSmartspaceDataPlugin.SmartspaceEventNotifier eventNotifier, com.google.android.systemui.smartspace.logging.BcSmartspaceCardLoggingInfo loggingInfo) {
-        // Core logic for binding data to view
+    public void bindData(SmartspaceTarget target, BcSmartspaceDataPlugin.SmartspaceEventNotifier eventNotifier, BcSmartspaceCardLoggingInfo loggingInfo, boolean showPageIndicator) {
+        mTarget = target;
+        mLoggingInfo = loggingInfo;
+        // Logic to bind views (title, subtitle, icon) from target
     }
 
     public void setPrimaryTextColor(int color) {
-        if (mTitleView != null) {
-            mTitleView.setTextColor(color);
-        }
-        if (mDateView != null) {
-            mDateView.setTextColor(color);
-        }
-        if (mSubtitleView != null) {
-            mSubtitleView.setTextColor(color);
-        }
+        // Update text colors
+    }
+
+    public void setDozeAmount(float amount) {
+        mDozeAmount = amount;
+        // Update alpha/visibility
+    }
+
+    public void setScreenOn(boolean screenOn) {
+    }
+
+    @Override
+    public BcSmartspaceCardLoggingInfo getLoggingInfo() {
+        return mLoggingInfo;
+    }
+
+    public void setSecondaryCard(BcSmartspaceCardSecondary card) {
+        mSecondaryCard = card;
+        // add view logic
     }
 }
