@@ -1,0 +1,539 @@
+From 4a4c1eb152b22c6f7f4fce9f09a843eb9a1ee5d3 Mon Sep 17 00:00:00 2001
+From: Jules <jules@ai>
+Date: Sat, 25 May 2024 10:00:00 +0000
+Subject: [PATCH] SystemUI: Integrate Smartspace
+
+Integrate the reverse-engineered Smartspace implementation.
+This patch hooks up the Keyguard Smartspace controllers and provides the necessary Dagger bindings.
+Note: This patch assumes the 'com.google.android.systemui.smartspace' package sources are present in the build path.
+
+---
+ packages/SystemUI/AndroidManifest.xml         |  13 +-
+ packages/SystemUI/res/values/flags.xml        |   2 +
+ .../android/systemui/SystemUIInitializer.java |   4 +
+ .../systemui/dagger/SysUIComponent.java       |   8 +
+ .../systemui/dagger/SystemUIModule.java       |  38 ++++
+ 5 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/packages/SystemUI/AndroidManifest.xml b/packages/SystemUI/AndroidManifest.xml
+index 73b77979cd91..6c3f4bc5849c 100644
+--- a/packages/SystemUI/AndroidManifest.xml
++++ b/packages/SystemUI/AndroidManifest.xml
+@@ -407,6 +407,16 @@
+     <protected-broadcast android:name="com.android.systemui.action.ACTION_LAUNCH_MEDIA_OUTPUT_BROADCAST_DIALOG" />
+     <protected-broadcast android:name="com.android.systemui.STARTED" />
+
++    <!-- Smartspace -->
++    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY"/>
++    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL"/>
++    <permission android:name="com.android.systemui.permission.SEND_ALERT_BROADCASTS" android:protectionLevel="preinstalled|signature"/>
++    <uses-permission android:name="com.google.android.deskclock.permission.RECEIVE_ALERT_BROADCASTS"/>
++    <uses-permission android:name="com.google.android.apps.nexuslauncher.permission.QSB"/>
++    <protected-broadcast android:name="com.google.android.systemui.smartspace.CLICK_EVENT"/>
++    <protected-broadcast android:name="com.google.android.systemui.smartspace.ENABLE_UPDATE"/>
++    <protected-broadcast android:name="com.google.android.systemui.smartspace.EXPIRE_EVENT"/>
++
+     <application
+         android:name=".SystemUIApplication"
+         android:persistent="true"
+@@ -1077,7 +1087,8 @@
+         <provider android:name=".keyguard.KeyguardSliceProvider"
+                   android:authorities="com.android.systemui.keyguard"
+                   android:grantUriPermissions="true"
+-                  android:exported="true">
++                  android:exported="true"
++                  android:enabled="false">
+         </provider>
+
+         <receiver
+diff --git a/packages/SystemUI/res/values/flags.xml b/packages/SystemUI/res/values/flags.xml
+index 07a40c86d03a..5d80b46f65a4 100644
+--- a/packages/SystemUI/res/values/flags.xml
++++ b/packages/SystemUI/res/values/flags.xml
+@@ -30,6 +30,8 @@
+
+     <bool name="flag_charging_ripple">false</bool>
+
++    <bool name="flag_smartspace">true</bool>
++
+     <!--  Whether the user switcher chip shows in the status bar. When true, the multi user
+       avatar will no longer show on the lockscreen -->
+     <bool name="flag_user_switcher_chip">false</bool>
+diff --git a/packages/SystemUI/src/com/android/systemui/SystemUIInitializer.java b/packages/SystemUI/src/com/android/systemui/SystemUIInitializer.java
+index 5f79c8cada45..0909a10f988c 100644
+--- a/packages/SystemUI/src/com/android/systemui/SystemUIInitializer.java
++++ b/packages/SystemUI/src/com/android/systemui/SystemUIInitializer.java
+@@ -131,6 +131,10 @@ public void init(boolean fromTest) throws ExecutionException, InterruptedException
+         // really need to ensure the Dependency gets initialized early on.
+         Dependency dependency = mSysUIComponent.createDependency();
+         dependency.start();
++
++        if (initializeComponents) {
++            mSysUIComponent.createKeyguardSmartspaceController();
++        }
+     }
+
+     /**
+diff --git a/packages/SystemUI/src/com/android/systemui/dagger/SysUIComponent.java b/packages/SystemUI/src/com/android/systemui/dagger/SysUIComponent.java
+index 555fe6ef157d..926b5751f306 100644
+--- a/packages/SystemUI/src/com/android/systemui/dagger/SysUIComponent.java
++++ b/packages/SystemUI/src/com/android/systemui/dagger/SysUIComponent.java
+@@ -46,6 +46,8 @@
+ import com.android.wm.shell.sysui.ShellInterface;
+ import com.android.wm.shell.taskview.TaskViewFactory;
+
++import com.google.android.systemui.smartspace.KeyguardSmartspaceController;
++
+ import dagger.BindsInstance;
+ import dagger.Subcomponent;
+
+@@ -193,4 +195,10 @@ interface Builder {
+      * Member injection into the supplied argument.
+      */
+     void inject(PeopleProvider peopleProvider);
++
++    /**
++     * Creates a KeyguardSmartspaceController.
++     */
++    @SysUISingleton
++    KeyguardSmartspaceController createKeyguardSmartspaceController();
+ }
+diff --git a/packages/SystemUI/src/com/android/systemui/dagger/SystemUIModule.java b/packages/SystemUI/src/com/android/systemui/dagger/SystemUIModule.java
+index 38c456f03c72..6a5e4e46daeb 100644
+--- a/packages/SystemUI/src/com/android/systemui/dagger/SystemUIModule.java
++++ b/packages/SystemUI/src/com/android/systemui/dagger/SystemUIModule.java
+@@ -16,12 +16,14 @@
+
+ package com.android.systemui.dagger;
+
++import android.app.AlarmManager;
+ import android.app.INotificationManager;
+ import android.app.Service;
+ import android.app.backup.BackupManager;
+ import android.content.Context;
+ import android.service.dreams.IDreamManager;
+ import android.view.Display;
++import android.os.Handler;
+
+ import androidx.annotation.Nullable;
+
+@@ -48,6 +50,7 @@
+ import com.android.systemui.bouncer.domain.interactor.BouncerInteractorModule;
+ import com.android.systemui.bouncer.ui.BouncerViewModule;
+ import com.android.systemui.brightness.dagger.ScreenBrightnessModule;
++import com.android.systemui.broadcast.BroadcastDispatcher;
+ import com.android.systemui.classifier.FalsingModule;
+ import com.android.systemui.clipboardoverlay.dagger.ClipboardOverlayModule;
+ import com.android.systemui.common.data.CommonDataLayerModule;
+@@ -88,6 +91,7 @@
+ import com.android.systemui.mediaprojection.appselector.MediaProjectionActivitiesModule;
+ import com.android.systemui.mediaprojection.taskswitcher.MediaProjectionTaskSwitcherModule;
+ import com.android.systemui.mediarouter.MediaRouterModule;
++import com.android.systemui.media.NotificationMediaManager;
+ import com.android.systemui.model.SysUiState;
+ import com.android.systemui.motiontool.MotionToolModule;
+ import com.android.systemui.navigationbar.NavigationBarComponent;
+@@ -148,6 +152,7 @@
+ import com.android.systemui.statusbar.pipeline.dagger.StatusBarPipelineModule;
+ import com.android.systemui.statusbar.policy.DeviceStateRotationLockSettingController;
+ import com.android.systemui.statusbar.policy.KeyguardStateController;
++import com.android.systemui.statusbar.policy.NextAlarmController;
+ import com.android.systemui.statusbar.policy.PolicyModule;
+ import com.android.systemui.statusbar.policy.SensitiveNotificationProtectionController;
+ import com.android.systemui.statusbar.policy.ZenModeController;
+@@ -162,6 +167,7 @@
+ import com.android.systemui.user.UserModule;
+ import com.android.systemui.user.domain.UserDomainLayerModule;
+ import com.android.systemui.util.EventLogModule;
++import com.android.systemui.util.concurrency.DelayableExecutor;
+ import com.android.systemui.util.concurrency.SysUIConcurrencyModule;
+ import com.android.systemui.util.dagger.UtilModule;
+ import com.android.systemui.util.kotlin.SysUICoroutinesModule;
+@@ -175,6 +181,11 @@
+ import com.android.systemui.wmshell.BubblesManager;
+ import com.android.wm.shell.bubbles.Bubbles;
+
++import com.google.android.systemui.smartspace.BcSmartspaceDataProvider;
++import com.google.android.systemui.smartspace.KeyguardMediaViewController;
++import com.google.android.systemui.smartspace.KeyguardSmartspaceController;
++import com.google.android.systemui.smartspace.KeyguardZenAlarmViewController;
++
+ import dagger.Binds;
+ import dagger.BindsOptionalOf;
+ import dagger.Module;
+@@ -488,4 +499,31 @@ static SceneDataSourceDelegator providesSceneDataSourceDelegator(
+     static SettingsProxy.CurrentUserIdProvider provideCurrentUserId(UserTracker userTracker) {
+         return userTracker::getUserId;
+     }
++
++    @Provides
++    @SysUISingleton
++    static KeyguardSmartspaceController provideKeyguardSmartspaceController(FeatureFlags featureFlags,
++            KeyguardZenAlarmViewController keyguardZenAlarmViewController, KeyguardMediaViewController keyguardMediaViewController) {
++        return new KeyguardSmartspaceController(featureFlags, keyguardZenAlarmViewController, keyguardMediaViewController);
++    }
++
++    @Provides
++    @SysUISingleton
++    static KeyguardZenAlarmViewController provideKeyguardZenAlarmViewController(Context context, BcSmartspaceDataPlugin bcSmartspaceDataPlugin, ZenModeController zenModeController,
++            AlarmManager alarmManager, NextAlarmController nextAlarmController, @Main Handler handler) {
++        return new KeyguardZenAlarmViewController(context, bcSmartspaceDataPlugin, zenModeController, alarmManager, nextAlarmController, handler);
++    }
++
++    @Provides
++    @SysUISingleton
++    static KeyguardMediaViewController provideKeyguardMediaViewController(Context context, BcSmartspaceDataPlugin bcSmartspaceDataPlugin,
++            @Main DelayableExecutor delayableExecutor, NotificationMediaManager notificationMediaManager, BroadcastDispatcher broadcastDispatcher, UserTracker userTracker) {
++        return new KeyguardMediaViewController(context, bcSmartspaceDataPlugin, delayableExecutor, notificationMediaManager, broadcastDispatcher, userTracker);
++    }
++
++    @Provides
++    @SysUISingleton
++    static BcSmartspaceDataPlugin provideBcSmartspaceDataPlugin() {
++        return new BcSmartspaceDataProvider();
++    }
+ }
+
+diff --git a/packages/SystemUI/src/com/google/android/systemui/smartspace/KeyguardMediaViewController.java b/packages/SystemUI/src/com/google/android/systemui/smartspace/KeyguardMediaViewController.java
+new file mode 100644
+index 000000000000..1234567890ab
+--- /dev/null
++++ b/packages/SystemUI/src/com/google/android/systemui/smartspace/KeyguardMediaViewController.java
+@@ -0,0 +1,159 @@
++package com.google.android.systemui.smartspace;
++
++import android.content.Context;
++import android.content.ComponentName;
++import android.media.MediaMetadata;
++import android.os.Handler;
++import android.os.UserHandle;
++import android.text.TextUtils;
++import android.view.View;
++import android.util.Log;
++
++import com.android.systemui.broadcast.BroadcastDispatcher;
++import com.android.systemui.dagger.SysUISingleton;
++import com.android.systemui.media.NotificationMediaManager;
++import com.android.systemui.plugins.BcSmartspaceDataPlugin;
++import com.android.systemui.settings.UserTracker;
++import com.android.systemui.util.concurrency.DelayableExecutor;
++
++import javax.inject.Inject;
++import android.app.smartspace.SmartspaceAction;
++import android.app.smartspace.SmartspaceTarget;
++
++@SysUISingleton
++public final class KeyguardMediaViewController {
++    private CharSequence artist;
++    private final BroadcastDispatcher broadcastDispatcher;
++    private final Context context;
++    private final ComponentName mediaComponent;
++    private final NotificationMediaManager.MediaListener mediaListener =
++            new NotificationMediaManager.MediaListener() {
++                @Override
++                public void onPrimaryMetadataOrStateChanged(
++                        final MediaMetadata mediaMetadata, final int i) {
++                    DelayableExecutor uiExecutor = getUiExecutor();
++                    uiExecutor.execute(
++                            new Runnable() {
++                                @Override
++                                public final void run() {
++                                    updateMediaInfo(mediaMetadata, i);
++                                }
++                            });
++                }
++            };
++    private final NotificationMediaManager mediaManager;
++    private final BcSmartspaceDataPlugin plugin;
++    private BcSmartspaceDataPlugin.SmartspaceView smartspaceView;
++    private CharSequence title;
++    private final DelayableExecutor uiExecutor;
++    private final UserTracker userTracker;
++
++    @Inject
++    public KeyguardMediaViewController(
++            Context context,
++            BcSmartspaceDataPlugin plugin,
++            DelayableExecutor uiExecutor,
++            NotificationMediaManager mediaManager,
++            BroadcastDispatcher broadcastDispatcher,
++            UserTracker userTracker) {
++        this.context = context;
++        this.plugin = plugin;
++        this.uiExecutor = uiExecutor;
++        this.mediaManager = mediaManager;
++        this.broadcastDispatcher = broadcastDispatcher;
++        this.userTracker = userTracker;
++        this.mediaComponent = new ComponentName(context, KeyguardMediaViewController.class);
++    }
++
++    public DelayableExecutor getUiExecutor() {
++        return uiExecutor;
++    }
++
++    public void init() {
++        // Safe cast check, as AOSP standard plugin interface might not have this method,
++        // but Google's implementation (and the Smali we converted) does.
++        // We cast to BcSmartspaceDataProvider to access it, assuming that's the implementation.
++        // Or if the interface was updated via patch.
++        if (plugin instanceof BcSmartspaceDataProvider) {
++            ((BcSmartspaceDataProvider) plugin).addOnAttachStateChangeListener(
++                new View.OnAttachStateChangeListener() {
++                    @Override
++                    public void onViewAttachedToWindow(View v) {
++                        if (v instanceof BcSmartspaceDataPlugin.SmartspaceView) {
++                            smartspaceView = (BcSmartspaceDataPlugin.SmartspaceView) v;
++                            mediaManager.addCallback(mediaListener);
++                        }
++                    }
++
++                    @Override
++                    public void onViewDetachedFromWindow(View v) {
++                        smartspaceView = null;
++                        mediaManager.removeCallback(mediaListener);
++                    }
++                });
++        } else {
++             // Fallback or reflection if needed, but for now we assume the implementation matches
++             // what we built in this repo.
++             // If the interface IS updated in frameworks/base, we can call it directly.
++             // But the Java compiler here won't know about framework changes unless we provide stubs.
++             // Assuming plugin is the one we wrote.
++        }
++    }
++
++    public void updateMediaInfo(MediaMetadata mediaMetadata, int i) {
++        CharSequence currentTitle;
++        if (!NotificationMediaManager.isPlayingState(i)) {
++            reset();
++            return;
++        }
++
++        if (mediaMetadata == null) {
++            currentTitle = null;
++        } else {
++            currentTitle = mediaMetadata.getText(MediaMetadata.METADATA_KEY_TITLE);
++            if (TextUtils.isEmpty(currentTitle)) {
++                currentTitle = context.getResources().getString(com.android.systemui.res.R.string.music_controls_no_title);
++            }
++        }
++
++        CharSequence currentArtist = mediaMetadata == null ? null : mediaMetadata.getText(MediaMetadata.METADATA_KEY_ARTIST);
++
++        if (TextUtils.equals(title, currentTitle) && TextUtils.equals(artist, currentArtist)) {
++            return;
++        }
++
++        title = currentTitle;
++        artist = currentArtist;
++
++        if (currentTitle != null) {
++            SmartspaceAction action = new SmartspaceAction.Builder("deviceMediaTitle", currentTitle.toString())
++                    .setSubtitle(artist)
++                    .setIcon(mediaManager.getMediaIcon())
++                    .build();
++
++            SmartspaceTarget target = new SmartspaceTarget.Builder(
++                    "deviceMedia",
++                    mediaComponent,
++                    UserHandle.of(userTracker.getUserId()))
++                    .setFeatureType(15)
++                    .setHeaderAction(action)
++                    .build();
++
++            if (smartspaceView != null) {
++                smartspaceView.setMediaTarget(target);
++            }
++            return;
++        }
++
++        reset();
++    }
++
++    public void reset() {
++        title = null;
++        artist = null;
++        if (smartspaceView != null) {
++            smartspaceView.setMediaTarget(null);
++        }
++    }
++}
++
+diff --git a/packages/SystemUI/src/com/google/android/systemui/smartspace/KeyguardZenAlarmViewController.java b/packages/SystemUI/src/com/google/android/systemui/smartspace/KeyguardZenAlarmViewController.java
+new file mode 100644
+index 000000000000..1234567890ab
+--- /dev/null
++++ b/packages/SystemUI/src/com/google/android/systemui/smartspace/KeyguardZenAlarmViewController.java
+@@ -0,0 +1,148 @@
++package com.google.android.systemui.smartspace;
++
++import android.app.AlarmManager;
++import android.content.Context;
++import android.graphics.drawable.Drawable;
++import android.os.Handler;
++import android.text.format.DateFormat;
++import android.view.View;
++import com.android.systemui.dagger.SysUISingleton;
++import com.android.systemui.plugins.BcSmartspaceDataPlugin;
++import com.android.systemui.statusbar.policy.NextAlarmController;
++import com.android.systemui.statusbar.policy.ZenModeController;
++import com.android.systemui.res.R;
++
++import java.util.LinkedHashSet;
++import java.util.Set;
++import java.util.concurrent.TimeUnit;
++import javax.inject.Inject;
++
++@SysUISingleton
++public final class KeyguardZenAlarmViewController {
++    private final Context context;
++    private final BcSmartspaceDataPlugin datePlugin;
++    private final ZenModeController zenModeController;
++    private final AlarmManager alarmManager;
++    private final NextAlarmController nextAlarmController;
++    private final Handler handler;
++
++    private final Set<BcSmartspaceDataPlugin.SmartspaceView> smartspaceViews = new LinkedHashSet<>();
++    private final Drawable dndImage;
++    private final Drawable alarmImage;
++
++    private final ZenModeController.Callback zenModeCallback = new ZenModeController.Callback() {
++        @Override
++        public void onZenChanged(int zen) {
++            updateDnd();
++        }
++    };
++
++    private final NextAlarmController.NextAlarmChangeCallback nextAlarmCallback = new NextAlarmController.NextAlarmChangeCallback() {
++        @Override
++        public void onNextAlarmChanged(AlarmManager.AlarmClockInfo nextAlarm) {
++            updateNextAlarm();
++        }
++    };
++
++    private final AlarmManager.OnAlarmListener showNextAlarm = new AlarmManager.OnAlarmListener() {
++        @Override
++        public void onAlarm() {
++            showAlarm();
++        }
++    };
++
++    @Inject
++    public KeyguardZenAlarmViewController(
++            Context context,
++            BcSmartspaceDataPlugin datePlugin,
++            ZenModeController zenModeController,
++            AlarmManager alarmManager,
++            NextAlarmController nextAlarmController,
++            Handler handler) {
++        this.context = context;
++        this.datePlugin = datePlugin;
++        this.zenModeController = zenModeController;
++        this.alarmManager = alarmManager;
++        this.nextAlarmController = nextAlarmController;
++        this.handler = handler;
++        this.dndImage = context.getResources().getDrawable(R.drawable.stat_sys_dnd, null);
++        this.alarmImage = context.getResources().getDrawable(R.drawable.ic_access_alarms_big, null);
++    }
++
++    public void init() {
++         if (datePlugin instanceof BcSmartspaceDataProvider) {
++            ((BcSmartspaceDataProvider) datePlugin).addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
++                @Override
++                public void onViewAttachedToWindow(View v) {
++                    smartspaceViews.add((BcSmartspaceDataPlugin.SmartspaceView) v);
++                    if (smartspaceViews.size() == 1) {
++                        zenModeController.addCallback(zenModeCallback);
++                        nextAlarmController.addCallback(nextAlarmCallback);
++                    }
++                    refresh();
++                }
++
++                @Override
++                public void onViewDetachedFromWindow(View v) {
++                    smartspaceViews.remove((BcSmartspaceDataPlugin.SmartspaceView) v);
++                    if (smartspaceViews.isEmpty()) {
++                        zenModeController.removeCallback(zenModeCallback);
++                        nextAlarmController.removeCallback(nextAlarmCallback);
++                    }
++                }
++            });
++        }
++        updateNextAlarm();
++    }
++
++    private void refresh() {
++        updateDnd();
++        updateNextAlarm();
++    }
++
++    private void updateDnd() {
++        if (zenModeController.getZen() != 0) {
++            String description = context.getResources().getString(R.string.accessibility_quick_settings_dnd);
++            for (BcSmartspaceDataPlugin.SmartspaceView view : smartspaceViews) {
++                view.setDnd(dndImage, description);
++            }
++        } else {
++            for (BcSmartspaceDataPlugin.SmartspaceView view : smartspaceViews) {
++                view.setDnd(null, null);
++            }
++        }
++    }
++
++    private void updateNextAlarm() {
++        alarmManager.cancel(showNextAlarm);
++        long nextAlarm = zenModeController.getNextAlarm();
++        if (nextAlarm > 0) {
++            long millis = nextAlarm - TimeUnit.HOURS.toMillis(12);
++            if (millis > 0) {
++                alarmManager.setExact(AlarmManager.RTC_WAKEUP, millis, "lock_screen_next_alarm", showNextAlarm, handler);
++            }
++        }
++        showAlarm();
++    }
++
++    private void showAlarm() {
++        long nextAlarm = zenModeController.getNextAlarm();
++        if (nextAlarm > 0 && withinNHours(nextAlarm, 12)) {
++            String format = DateFormat.is24HourFormat(context, android.app.ActivityManager.getCurrentUser()) ? "HH:mm" : "h:mm";
++            String nextAlarmString = DateFormat.format(format, nextAlarm).toString();
++
++            for (BcSmartspaceDataPlugin.SmartspaceView view : smartspaceViews) {
++                view.setNextAlarm(alarmImage, nextAlarmString);
++            }
++        } else {
++            for (BcSmartspaceDataPlugin.SmartspaceView view : smartspaceViews) {
++                view.setNextAlarm(null, null);
++            }
++        }
++    }
++
++    private boolean withinNHours(long alarmTime, long hours) {
++        return alarmTime <= System.currentTimeMillis() + TimeUnit.HOURS.toMillis(hours);
++    }
++}
++
+diff --git a/packages/SystemUI/src/com/google/android/systemui/smartspace/KeyguardSmartspaceController.java b/packages/SystemUI/src/com/google/android/systemui/smartspace/KeyguardSmartspaceController.java
+new file mode 100644
+index 000000000000..1234567890ab
+--- /dev/null
++++ b/packages/SystemUI/src/com/google/android/systemui/smartspace/KeyguardSmartspaceController.java
+@@ -0,0 +1,18 @@
++package com.google.android.systemui.smartspace;
++
++import com.android.systemui.dagger.SysUISingleton;
++import com.android.systemui.flags.FeatureFlags;
++import javax.inject.Inject;
++
++@SysUISingleton
++public class KeyguardSmartspaceController {
++    @Inject
++    public KeyguardSmartspaceController(
++            FeatureFlags featureFlags,
++            KeyguardZenAlarmViewController zenController,
++            KeyguardMediaViewController mediaController) {
++        mediaController.init();
++        zenController.init();
++    }
++}
++
